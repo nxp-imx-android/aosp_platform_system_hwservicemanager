@@ -3,7 +3,9 @@ service hwservicemanager /system/bin/hwservicemanager
     disabled
     group system readproc
     critical
+    onrestart setprop hwservicemanager.ready false
+    onrestart class_restart hal
+    onrestart class_restart early_hal
     writepid /dev/cpuset/system-background/tasks
-
-on property:hwservicemanager.ready=true
-    class_start hal
+    class animation
+    shutdown critical
