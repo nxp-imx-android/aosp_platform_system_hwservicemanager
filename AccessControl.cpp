@@ -37,9 +37,9 @@ AccessControl::AccessControl() {
 }
 
 bool AccessControl::canAdd(const std::string& fqName, pid_t pid) {
-    FQName fqIface(fqName);
+    FQName fqIface;
 
-    if (!fqIface.isValid()) {
+    if (!FQName::parse(fqName, &fqIface)) {
         return false;
     }
     const std::string checkName = fqIface.package() + "::" + fqIface.name();
@@ -48,9 +48,9 @@ bool AccessControl::canAdd(const std::string& fqName, pid_t pid) {
 }
 
 bool AccessControl::canGet(const std::string& fqName, pid_t pid) {
-    FQName fqIface(fqName);
+    FQName fqIface;
 
-    if (!fqIface.isValid()) {
+    if (!FQName::parse(fqName, &fqIface)) {
         return false;
     }
     const std::string checkName = fqIface.package() + "::" + fqIface.name();
