@@ -21,7 +21,7 @@ using android::FQName;
 
 AccessControl::AccessControl() {
     mSeHandle = selinux_android_hw_service_context_handle();
-    LOG_ALWAYS_FATAL_IF(mSeHandle == NULL, "Failed to acquire SELinux handle.");
+    LOG_ALWAYS_FATAL_IF(mSeHandle == nullptr, "Failed to acquire SELinux handle.");
 
     if (getcon(&mSeContext) != 0) {
         LOG_ALWAYS_FATAL("Failed to acquire hwservicemanager context.");
@@ -64,7 +64,7 @@ bool AccessControl::canList(pid_t pid) {
 
 bool AccessControl::checkPermission(pid_t sourcePid, const char *targetContext,
                                     const char *perm, const char *interface) {
-    char *sourceContext = NULL;
+    char *sourceContext = nullptr;
     bool allowed = false;
     struct audit_data ad;
 
@@ -85,7 +85,7 @@ bool AccessControl::checkPermission(pid_t sourcePid, const char *targetContext,
 }
 
 bool AccessControl::checkPermission(pid_t sourcePid, const char *perm, const char *interface) {
-    char *targetContext = NULL;
+    char *targetContext = nullptr;
     bool allowed = false;
 
     // Lookup service in hwservice_contexts
