@@ -6,9 +6,10 @@
 #include <unistd.h>
 #include <sys/timerfd.h>
 
-#include <android/hidl/manager/1.1/BnHwServiceManager.h>
 #include <android/hidl/token/1.0/ITokenManager.h>
 #include <cutils/properties.h>
+#include <hidl/HidlBinderSupport.h>
+#include <hidl/HidlTransportSupport.h>
 #include <hidl/Status.h>
 #include <hwbinder/IPCThreadState.h>
 #include <hwbinder/ProcessState.h>
@@ -25,18 +26,19 @@ using android::Looper;
 using android::LooperCallback;
 
 // libhwbinder:
+using android::hardware::BHwBinder;
+using android::hardware::IBinder;
 using android::hardware::IPCThreadState;
 using android::hardware::ProcessState;
 
 // libhidl
 using android::hardware::handleTransportPoll;
 using android::hardware::setupTransportPolling;
-
-// hidl types
-using android::hidl::manager::V1_1::BnHwServiceManager;
+using android::hardware::toBinder;
 
 // implementations
 using android::hidl::manager::implementation::ServiceManager;
+using android::hidl::manager::V1_0::IServiceManager;
 using android::hidl::token::V1_0::implementation::TokenManager;
 
 static std::string serviceName = "default";
@@ -129,7 +131,8 @@ int main() {
     }
 
     // Tell IPCThreadState we're the service manager
-    sp<BnHwServiceManager> service = new BnHwServiceManager(manager);
+    sp<IBinder> binder = toBinder<IServiceManager>(manager);
+    sp<BHwBinder> service = static_cast<BHwBinder*>(binder.get()); // local binder object
     IPCThreadState::self()->setTheContextObject(service);
     // Then tell the kernel
     ProcessState::self()->becomeContextManager(nullptr, nullptr);
