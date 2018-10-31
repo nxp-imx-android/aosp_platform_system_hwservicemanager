@@ -572,6 +572,21 @@ Return<bool> ServiceManager::addWithChain(const hidl_string& name,
     return addImpl(name, service, chain, context, pid);
 }
 
+Return<void> ServiceManager::listManifestByInterface(const hidl_string& fqName,
+                                                     listManifestByInterface_cb _hidl_cb) {
+    pid_t pid = IPCThreadState::self()->getCallingPid();
+    if (!mAcl.canGet(fqName, pid)) {
+        _hidl_cb({});
+        return Void();
+    }
+
+    std::set<std::string> instances = getInstances(fqName);
+    hidl_vec<hidl_string> ret(instances.begin(), instances.end());
+
+    _hidl_cb(ret);
+    return Void();
+}
+
 Return<void> ServiceManager::debugDump(debugDump_cb _cb) {
     pid_t pid = IPCThreadState::self()->getCallingPid();
     if (!mAcl.canList(pid)) {
