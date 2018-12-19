@@ -5,6 +5,7 @@
 
 #include <android-base/logging.h>
 #include <android-base/properties.h>
+#include <cutils/android_filesystem_config.h>
 #include <hwbinder/IPCThreadState.h>
 #include <hidl/HidlSupport.h>
 #include <hidl/HidlTransportSupport.h>
@@ -285,6 +286,11 @@ bool ServiceManager::addImpl(const hidl_string& name,
                              const hidl_vec<hidl_string>& interfaceChain,
                              const AccessControl::Context &context,
                              pid_t pid) {
+    if (IPCThreadState::self()->getCallingUid() >= AID_APP_START) {
+        LOG(ERROR) << "App cannot register service " << name;
+        return false;
+    }
+
     if (interfaceChain.size() == 0) {
         LOG(WARNING) << "Empty interface chain for " << name;
         return false;
