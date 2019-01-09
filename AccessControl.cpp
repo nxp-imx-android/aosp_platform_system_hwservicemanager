@@ -14,11 +14,11 @@ static const char *kPermissionList = "list";
 
 struct audit_data {
     const char* interfaceName;
-    const char* sid;
     pid_t       pid;
 };
 
 using android::FQName;
+using Context = AccessControl::Context;
 
 AccessControl::AccessControl() {
     mSeHandle = selinux_android_hw_service_context_handle();
@@ -37,7 +37,7 @@ AccessControl::AccessControl() {
     selinux_set_callback(SELINUX_CB_LOG, mSeCallbacks);
 }
 
-bool AccessControl::canAdd(const std::string& fqName, const CallingContext& callingContext) {
+bool AccessControl::canAdd(const std::string& fqName, const Context &context, pid_t pid) {
     FQName fqIface;
 
     if (!FQName::parse(fqName, &fqIface)) {
@@ -45,10 +45,10 @@ bool AccessControl::canAdd(const std::string& fqName, const CallingContext& call
     }
     const std::string checkName = fqIface.package() + "::" + fqIface.name();
 
-    return checkPermission(callingContext, kPermissionAdd, checkName.c_str());
+    return checkPermission(context, pid, kPermissionAdd, checkName.c_str());
 }
 
-bool AccessControl::canGet(const std::string& fqName, const CallingContext& callingContext) {
+bool AccessControl::canGet(const std::string& fqName, pid_t pid) {
     FQName fqIface;
 
     if (!FQName::parse(fqName, &fqIface)) {
@@ -56,45 +56,42 @@ bool AccessControl::canGet(const std::string& fqName, const CallingContext& call
     }
     const std::string checkName = fqIface.package() + "::" + fqIface.name();
 
-    return checkPermission(callingContext, kPermissionGet, checkName.c_str());
+    return checkPermission(getContext(pid), pid, kPermissionGet, checkName.c_str());
 }
 
-bool AccessControl::canList(const CallingContext& callingContext) {
-    return checkPermission(callingContext, mSeContext, kPermissionList, nullptr);
+bool AccessControl::canList(pid_t pid) {
+    return checkPermission(getContext(pid), pid, mSeContext, kPermissionList, nullptr);
 }
 
-AccessControl::CallingContext AccessControl::getCallingContext(pid_t sourcePid) {
+Context AccessControl::getContext(pid_t sourcePid) {
     char *sourceContext = nullptr;
 
     if (getpidcon(sourcePid, &sourceContext) < 0) {
         ALOGE("SELinux: failed to retrieve process context for pid %d", sourcePid);
-        return { false, "", sourcePid };
+        return Context(nullptr, freecon);
     }
 
-    std::string context = sourceContext;
-    freecon(sourceContext);
-    return { true, context, sourcePid };
+    return Context(sourceContext, freecon);
 }
 
-bool AccessControl::checkPermission(const CallingContext& source, const char *targetContext, const char *perm, const char *interface) {
-    if (!source.sidPresent) {
+bool AccessControl::checkPermission(const Context &context, pid_t sourceAuditPid, const char *targetContext, const char *perm, const char *interface) {
+    if (context == nullptr) {
         return false;
     }
 
     bool allowed = false;
-
     struct audit_data ad;
-    ad.pid = source.pid;
-    ad.sid = source.sid.c_str();
+
+    ad.pid = sourceAuditPid;
     ad.interfaceName = interface;
 
-    allowed = (selinux_check_access(source.sid.c_str(), targetContext, "hwservice_manager",
+    allowed = (selinux_check_access(context.get(), targetContext, "hwservice_manager",
                                     perm, (void *) &ad) == 0);
 
     return allowed;
 }
 
-bool AccessControl::checkPermission(const CallingContext& source, const char *perm, const char *interface) {
+bool AccessControl::checkPermission(const Context &context, pid_t sourceAuditPid, const char *perm, const char *interface) {
     char *targetContext = nullptr;
     bool allowed = false;
 
@@ -104,7 +101,7 @@ bool AccessControl::checkPermission(const CallingContext& source, const char *pe
         return false;
     }
 
-    allowed = checkPermission(source, targetContext, perm, interface);
+    allowed = checkPermission(context, sourceAuditPid, targetContext, perm, interface);
 
     freecon(targetContext);
 
@@ -119,9 +116,7 @@ int AccessControl::auditCallback(void *data, security_class_t /*cls*/, char *buf
         return 0;
     }
 
-    const char* sid = ad->sid ? ad->sid : "N/A";
-
-    snprintf(buf, len, "interface=%s sid=%s pid=%d", ad->interfaceName, sid, ad->pid);
+    snprintf(buf, len, "interface=%s pid=%d", ad->interfaceName, ad->pid);
     return 0;
 }
 
