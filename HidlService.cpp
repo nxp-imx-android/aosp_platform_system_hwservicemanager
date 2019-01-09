@@ -36,7 +36,7 @@ void HidlService::setService(sp<IBase> service, pid_t pid) {
     sendRegistrationNotifications();
 }
 
-pid_t HidlService::getDebugPid() const {
+pid_t HidlService::getPid() const {
     return mPid;
 }
 const std::string &HidlService::getInterfaceName() const {
