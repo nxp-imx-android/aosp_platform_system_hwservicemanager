@@ -13,6 +13,7 @@
 #include <thread>
 
 using android::hardware::IPCThreadState;
+using ::android::hardware::interfacesEqual;
 
 namespace android {
 namespace hidl {
@@ -22,30 +23,55 @@ namespace implementation {
 static constexpr uint64_t kServiceDiedCookie = 0;
 static constexpr uint64_t kPackageListenerDiedCookie = 1;
 static constexpr uint64_t kServiceListenerDiedCookie = 2;
+static constexpr uint64_t kClientCallbackDiedCookie = 3;
 
 size_t ServiceManager::countExistingService() const {
     size_t total = 0;
     forEachExistingService([&] (const HidlService *) {
         ++total;
+        return true;  // continue
     });
     return total;
 }
 
-void ServiceManager::forEachExistingService(std::function<void(const HidlService *)> f) const {
-    forEachServiceEntry([f] (const HidlService *service) {
+void ServiceManager::forEachExistingService(std::function<bool(const HidlService *)> f) const {
+    forEachServiceEntry([&] (const HidlService *service) {
         if (service->getService() == nullptr) {
-            return;
+            return true;  // continue
         }
-        f(service);
+        return f(service);
     });
 }
 
-void ServiceManager::forEachServiceEntry(std::function<void(const HidlService *)> f) const {
-    for (const auto &interfaceMapping : mServiceMap) {
-        const auto &instanceMap = interfaceMapping.second.getInstanceMap();
+void ServiceManager::forEachExistingService(std::function<bool(HidlService *)> f) {
+    forEachServiceEntry([&] (HidlService *service) {
+        if (service->getService() == nullptr) {
+            return true;  // continue
+        }
+        return f(service);
+    });
+}
 
-        for (const auto &instanceMapping : instanceMap) {
-            f(instanceMapping.second.get());
+void ServiceManager::forEachServiceEntry(std::function<bool(const HidlService *)> f) const {
+    for (const auto& interfaceMapping : mServiceMap) {
+        const auto& instanceMap = interfaceMapping.second.getInstanceMap();
+
+        for (const auto& instanceMapping : instanceMap) {
+            if (!f(instanceMapping.second.get())) {
+                return;
+            }
+        }
+    }
+}
+
+void ServiceManager::forEachServiceEntry(std::function<bool(HidlService *)> f) {
+    for (auto& interfaceMapping : mServiceMap) {
+        auto& instanceMap = interfaceMapping.second.getInstanceMap();
+
+        for (auto& instanceMapping : instanceMap) {
+            if (!f(instanceMapping.second.get())) {
+                return;
+            }
         }
     }
 }
@@ -62,11 +88,17 @@ void ServiceManager::serviceDied(uint64_t cookie, const wp<IBase>& who) {
         case kServiceListenerDiedCookie:
             serviceRemoved = removeServiceListener(who);
             break;
+        case kClientCallbackDiedCookie: {
+            sp<IBase> base = who.promote();
+            IClientCallback* callback = static_cast<IClientCallback*>(base.get());
+            serviceRemoved = unregisterClientCallback(nullptr /*service*/,
+                                                      sp<IClientCallback>(callback));
+        } break;
     }
 
     if (!serviceRemoved) {
-        LOG(ERROR) << "Received death notification but serivce not removed. Cookie: " << cookie
-                   << " Service pointer: " << who.promote().get();
+        LOG(ERROR) << "Received death notification but interface instance not removed. Cookie: "
+                   << cookie << " Service pointer: " << who.promote().get();
     }
 }
 
@@ -140,8 +172,6 @@ void ServiceManager::PackageInterfaceMap::addPackageListener(sp<IServiceNotifica
 }
 
 bool ServiceManager::PackageInterfaceMap::removePackageListener(const wp<IBase>& who) {
-    using ::android::hardware::interfacesEqual;
-
     bool found = false;
 
     for (auto it = mPackageListeners.begin(); it != mPackageListeners.end();) {
@@ -157,8 +187,6 @@ bool ServiceManager::PackageInterfaceMap::removePackageListener(const wp<IBase>&
 }
 
 bool ServiceManager::PackageInterfaceMap::removeServiceListener(const wp<IBase>& who) {
-    using ::android::hardware::interfacesEqual;
-
     bool found = false;
 
     for (auto &servicePair : getInstanceMap()) {
@@ -198,8 +226,10 @@ Return<sp<IBase>> ServiceManager::get(const hidl_string& hidlFqName,
         return nullptr;
     }
 
-    const PackageInterfaceMap &ifaceMap = ifaceIt->second;
-    const HidlService *hidlService = ifaceMap.lookup(name);
+    PackageInterfaceMap &ifaceMap = ifaceIt->second;
+
+    // may be modified in post-command task
+    HidlService *hidlService = ifaceMap.lookup(name);
 
     if (hidlService == nullptr) {
         tryStartService(fqName, hidlName);
@@ -212,85 +242,105 @@ Return<sp<IBase>> ServiceManager::get(const hidl_string& hidlFqName,
         return nullptr;
     }
 
+    // Let HidlService know that we handed out a client. If the client drops the service before the
+    // next time handleClientCallbacks is called, it will still know that the service had been handed out.
+    hidlService->guaranteeClient();
+
+    // This is executed immediately after the binder driver confirms the transaction. The driver
+    // will update the appropriate data structures to reflect the fact that the client now has the
+    // service this function is returning. Nothing else can update the HidlService at the same
+    // time. This will run before anything else can modify the HidlService which is owned by this
+    // object, so it will be in the same state that it was when this function returns.
+    hardware::addPostCommandTask([hidlService] {
+        hidlService->handleClientCallbacks();
+    });
+
     return service;
 }
 
 Return<bool> ServiceManager::add(const hidl_string& name, const sp<IBase>& service) {
-    bool isValidService = false;
+    bool addSuccess = false;
 
     if (service == nullptr) {
         return false;
     }
 
-    // TODO(b/34235311): use HIDL way to determine this
-    // also, this assumes that the PID that is registering is the pid that is the service
     pid_t pid = IPCThreadState::self()->getCallingPid();
     auto context = mAcl.getContext(pid);
 
     auto ret = service->interfaceChain([&](const auto &interfaceChain) {
-        if (interfaceChain.size() == 0) {
-            return;
-        }
-
-        // First, verify you're allowed to add() the whole interface hierarchy
-        for(size_t i = 0; i < interfaceChain.size(); i++) {
-            const std::string fqName = interfaceChain[i];
-
-            if (!mAcl.canAdd(fqName, context, pid)) {
-                return;
-            }
-        }
-
-        {
-            // For IBar extends IFoo if IFoo/default is being registered, remove
-            // IBar/default. This makes sure the following two things are equivalent
-            // 1). IBar::castFrom(IFoo::getService(X))
-            // 2). IBar::getService(X)
-            // assuming that IBar is declared in the device manifest and there
-            // is also not an IBaz extends IFoo.
-            const std::string childFqName = interfaceChain[0];
-            const PackageInterfaceMap &ifaceMap = mServiceMap[childFqName];
-            const HidlService *hidlService = ifaceMap.lookup(name);
-            if (hidlService != nullptr) {
-                const sp<IBase> remove = hidlService->getService();
-
-                if (remove != nullptr) {
-                    const std::string instanceName = name;
-                    removeService(remove, &instanceName /* restrictToInstanceName */);
-                }
-            }
-        }
-
-        for(size_t i = 0; i < interfaceChain.size(); i++) {
-            const std::string fqName = interfaceChain[i];
-
-            PackageInterfaceMap &ifaceMap = mServiceMap[fqName];
-            HidlService *hidlService = ifaceMap.lookup(name);
-
-            if (hidlService == nullptr) {
-                ifaceMap.insertService(
-                    std::make_unique<HidlService>(fqName, name, service, pid));
-            } else {
-                hidlService->setService(service, pid);
-            }
-
-            ifaceMap.sendPackageRegistrationNotification(fqName, name);
-        }
-
-        bool linkRet = service->linkToDeath(this, kServiceDiedCookie).withDefault(false);
-        if (!linkRet) {
-            LOG(ERROR) << "Could not link to death for " << interfaceChain[0] << "/" << name;
-        }
-
-        isValidService = true;
+        addSuccess = addImpl(name, service, interfaceChain, context, pid);
     });
 
     if (!ret.isOk()) {
-        LOG(ERROR) << "Failed to retrieve interface chain.";
+        LOG(ERROR) << "Failed to retrieve interface chain: " << ret.description();
         return false;
     }
 
-    return isValidService;
+    return addSuccess;
+}
+
+bool ServiceManager::addImpl(const hidl_string& name,
+                             const sp<IBase>& service,
+                             const hidl_vec<hidl_string>& interfaceChain,
+                             const AccessControl::Context &context,
+                             pid_t pid) {
+    if (interfaceChain.size() == 0) {
+        LOG(WARNING) << "Empty interface chain for " << name;
+        return false;
+    }
+
+    // First, verify you're allowed to add() the whole interface hierarchy
+    for(size_t i = 0; i < interfaceChain.size(); i++) {
+        const std::string fqName = interfaceChain[i];
+
+        if (!mAcl.canAdd(fqName, context, pid)) {
+            return false;
+        }
+    }
+
+    {
+        // For IBar extends IFoo if IFoo/default is being registered, remove
+        // IBar/default. This makes sure the following two things are equivalent
+        // 1). IBar::castFrom(IFoo::getService(X))
+        // 2). IBar::getService(X)
+        // assuming that IBar is declared in the device manifest and there
+        // is also not an IBaz extends IFoo.
+        const std::string childFqName = interfaceChain[0];
+        const PackageInterfaceMap &ifaceMap = mServiceMap[childFqName];
+        const HidlService *hidlService = ifaceMap.lookup(name);
+        if (hidlService != nullptr) {
+            const sp<IBase> remove = hidlService->getService();
+
+            if (remove != nullptr) {
+                const std::string instanceName = name;
+                removeService(remove, &instanceName /* restrictToInstanceName */);
+            }
+        }
+    }
+
+    for(size_t i = 0; i < interfaceChain.size(); i++) {
+        const std::string fqName = interfaceChain[i];
+
+        PackageInterfaceMap &ifaceMap = mServiceMap[fqName];
+        HidlService *hidlService = ifaceMap.lookup(name);
+
+        if (hidlService == nullptr) {
+            ifaceMap.insertService(
+                std::make_unique<HidlService>(fqName, name, service, pid));
+        } else {
+            hidlService->setService(service, pid);
+        }
+
+        ifaceMap.sendPackageRegistrationNotification(fqName, name);
+    }
+
+    bool linkRet = service->linkToDeath(this, kServiceDiedCookie).withDefault(false);
+    if (!linkRet) {
+        LOG(ERROR) << "Could not link to death for " << interfaceChain[0] << "/" << name;
+    }
+
+    return true;
 }
 
 Return<ServiceManager::Transport> ServiceManager::getTransport(const hidl_string& fqName,
@@ -327,6 +377,7 @@ Return<void> ServiceManager::list(list_cb _hidl_cb) {
     size_t idx = 0;
     forEachExistingService([&] (const HidlService *service) {
         list[idx++] = service->string();
+        return true;  // continue
     });
 
     _hidl_cb(list);
@@ -387,8 +438,8 @@ Return<bool> ServiceManager::registerForNotifications(const hidl_string& fqName,
     PackageInterfaceMap &ifaceMap = mServiceMap[fqName];
 
     if (name.empty()) {
-        auto ret = callback->linkToDeath(this, kPackageListenerDiedCookie);
-        if (!ret.isOk()) {
+        bool ret = callback->linkToDeath(this, kPackageListenerDiedCookie).withDefault(false);
+        if (!ret) {
             LOG(ERROR) << "Failed to register death recipient for " << fqName << "/" << name;
             return false;
         }
@@ -398,8 +449,8 @@ Return<bool> ServiceManager::registerForNotifications(const hidl_string& fqName,
 
     HidlService *service = ifaceMap.lookup(name);
 
-    auto ret = callback->linkToDeath(this, kServiceListenerDiedCookie);
-    if (!ret.isOk()) {
+    bool ret = callback->linkToDeath(this, kServiceListenerDiedCookie).withDefault(false);
+    if (!ret) {
         LOG(ERROR) << "Failed to register death recipient for " << fqName << "/" << name;
         return false;
     }
@@ -451,6 +502,95 @@ Return<bool> ServiceManager::unregisterForNotifications(const hidl_string& fqNam
     return service->removeListener(callback);
 }
 
+Return<bool> ServiceManager::registerClientCallback(const sp<IBase>& server,
+                                                    const sp<IClientCallback>& cb) {
+    if (server == nullptr || cb == nullptr) return false;
+
+    // only the server of the interface can register a client callback
+    pid_t pid = IPCThreadState::self()->getCallingPid();
+
+    HidlService* registered = nullptr;
+
+    forEachExistingService([&] (HidlService *service) {
+        if (service->getPid() != pid) {
+            return true;  // continue
+        }
+
+        if (interfacesEqual(service->getService(), server)) {
+            service->addClientCallback(cb);
+            registered = service;
+            return false;  // break
+        }
+        return true;  // continue
+    });
+
+    if (registered != nullptr) {
+        bool linkRet = cb->linkToDeath(this, kClientCallbackDiedCookie).withDefault(false);
+        if (!linkRet) {
+            LOG(ERROR) << "Could not link to death for registerClientCallback";
+            unregisterClientCallback(server, cb);
+            registered = nullptr;
+        }
+    }
+
+    if (registered != nullptr) {
+        registered->handleClientCallbacks();
+    }
+
+    return registered != nullptr;
+}
+
+Return<bool> ServiceManager::unregisterClientCallback(const sp<IBase>& server,
+                                                      const sp<IClientCallback>& cb) {
+    if (cb == nullptr) return false;
+
+    bool removed = false;
+
+    forEachExistingService([&] (HidlService *service) {
+        if (server == nullptr || interfacesEqual(service->getService(), server)) {
+            removed |= service->removeClientCallback(cb);
+        }
+        return true;  // continue
+    });
+
+    return removed;
+}
+
+void ServiceManager::handleClientCallbacks() {
+    forEachServiceEntry([&] (HidlService *service) {
+        service->handleClientCallbacks();
+        return true;  // continue
+    });
+}
+
+Return<bool> ServiceManager::addWithChain(const hidl_string& name,
+                                          const sp<IBase>& service,
+                                          const hidl_vec<hidl_string>& chain) {
+    if (service == nullptr) {
+        return false;
+    }
+
+    pid_t pid = IPCThreadState::self()->getCallingPid();
+    auto context = mAcl.getContext(pid);
+
+    return addImpl(name, service, chain, context, pid);
+}
+
+Return<void> ServiceManager::listManifestByInterface(const hidl_string& fqName,
+                                                     listManifestByInterface_cb _hidl_cb) {
+    pid_t pid = IPCThreadState::self()->getCallingPid();
+    if (!mAcl.canGet(fqName, pid)) {
+        _hidl_cb({});
+        return Void();
+    }
+
+    std::set<std::string> instances = getInstances(fqName);
+    hidl_vec<hidl_string> ret(instances.begin(), instances.end());
+
+    _hidl_cb(ret);
+    return Void();
+}
+
 Return<void> ServiceManager::debugDump(debugDump_cb _cb) {
     pid_t pid = IPCThreadState::self()->getCallingPid();
     if (!mAcl.canList(pid)) {
@@ -475,6 +615,8 @@ Return<void> ServiceManager::debugDump(debugDump_cb _cb) {
             .clientPids = clientPids,
             .arch = ::android::hidl::base::V1_0::DebugInfo::Architecture::UNKNOWN
         });
+
+        return true;  // continue
     });
 
     _cb(list);
@@ -514,8 +656,6 @@ Return<void> ServiceManager::registerPassthroughClient(const hidl_string &fqName
 }
 
 bool ServiceManager::removeService(const wp<IBase>& who, const std::string* restrictToInstanceName) {
-    using ::android::hardware::interfacesEqual;
-
     bool keepInstance = false;
     bool removed = false;
     for (auto &interfaceMapping : mServiceMap) {

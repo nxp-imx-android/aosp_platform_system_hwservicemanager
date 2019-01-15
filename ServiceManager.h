@@ -21,6 +21,7 @@ using ::android::hardware::Return;
 using ::android::hardware::Void;
 using ::android::hidl::base::V1_0::IBase;
 using ::android::hidl::manager::V1_0::IServiceNotification;
+using ::android::hidl::manager::V1_2::IClientCallback;
 using ::android::sp;
 using ::android::wp;
 
@@ -51,16 +52,39 @@ struct ServiceManager : public V1_2::IServiceManager, hidl_death_recipient {
                                             const hidl_string& name,
                                             const sp<IServiceNotification>& callback) override;
 
+    // Methods from ::android::hidl::manager::V1_2::IServiceManager follow.
+    Return<bool> registerClientCallback(const sp<IBase>& server,
+                                        const sp<IClientCallback>& cb) override;
+    Return<bool> unregisterClientCallback(const sp<IBase>& server,
+                                          const sp<IClientCallback>& cb) override;
+    Return<bool> addWithChain(const hidl_string& name,
+                              const sp<IBase>& service,
+                              const hidl_vec<hidl_string>& chain) override;
+    Return<void> listManifestByInterface(const hidl_string& fqInstanceName,
+                                         listManifestByInterface_cb _hidl_cb) override;
+
+    void handleClientCallbacks();
+
     virtual void serviceDied(uint64_t cookie, const wp<IBase>& who);
 private:
+    bool addImpl(const hidl_string& name,
+                 const sp<IBase>& service,
+                 const hidl_vec<hidl_string>& interfaceChain,
+                 const AccessControl::Context &context,
+                 pid_t pid);
+
     // if restrictToInstanceName is nullptr, remove all, otherwise only those services
     // which match this instance name. Returns whether all instances were removed.
     bool removeService(const wp<IBase>& who, const std::string* restrictToInstanceName);
     bool removePackageListener(const wp<IBase>& who);
     bool removeServiceListener(const wp<IBase>& who);
     size_t countExistingService() const;
-    void forEachExistingService(std::function<void(const HidlService *)> f) const;
-    void forEachServiceEntry(std::function<void(const HidlService *)> f) const;
+
+    // true = continue, false = break
+    void forEachExistingService(std::function<bool(const HidlService *)> f) const;
+    void forEachExistingService(std::function<bool(HidlService *)> f);
+    void forEachServiceEntry(std::function<bool(const HidlService *)> f) const;
+    void forEachServiceEntry(std::function<bool(HidlService *)> f);
 
     using InstanceMap = std::map<
             std::string, // instance name e.x. "manager"
