@@ -13,6 +13,8 @@ namespace hidl {
 namespace manager {
 namespace implementation {
 
+static constexpr int kNoClientRepeatLimit = 2;
+
 HidlService::HidlService(
     const std::string &interfaceName,
     const std::string &instanceName,
@@ -102,7 +104,7 @@ bool HidlService::removeClientCallback(const sp<IClientCallback>& callback) {
     return found;
 }
 
-void HidlService::handleClientCallbacks() {
+void HidlService::handleClientCallbacks(bool isCalledOnInterval) {
     using ::android::hardware::toBinder;
     using ::android::hardware::BpHwBinder;
     using ::android::hardware::IBinder;
@@ -124,17 +126,20 @@ void HidlService::handleClientCallbacks() {
 
     bool hasClients = count > 1; // this process holds a strong count
 
-    // a handle was handed out, but it was immediately dropped
-    if (mGuaranteeClient && !hasClients) {
-        sendClientCallbackNotifications(true); // for when we handed it out
-        mHasClients = true;
+    // a client has its first client OR a handle was handed out, but it was immediately dropped
+    if ((hasClients && !mHasClients) || (mGuaranteeClient && !hasClients)) {
+        sendClientCallbackNotifications(true); // for first ref, or for when we handed it out
     }
 
-    if (hasClients != mHasClients) {
-        sendClientCallbackNotifications(hasClients);
+    // there are no more clients, but the callback has not been called yet
+    if (isCalledOnInterval && !hasClients && mHasClients) {
+        mNoClientsCounter++;
     }
 
-    mHasClients = hasClients;
+    if (mNoClientsCounter >= kNoClientRepeatLimit) {
+        sendClientCallbackNotifications(false);
+    }
+
     mGuaranteeClient = false;
 }
 
@@ -177,6 +182,9 @@ void HidlService::sendClientCallbackNotifications(bool hasClients) {
             LOG(WARNING) << "onClients callback failed for " << string() << ": " << ret.description();
         }
     }
+
+    mNoClientsCounter = 0;
+    mHasClients = hasClients;
 }
 
 
