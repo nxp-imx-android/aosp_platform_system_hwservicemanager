@@ -34,6 +34,9 @@ void HidlService::setService(sp<IBase> service, pid_t pid) {
     mPid = pid;
 
     mClientCallbacks.clear();
+    mHasClients = false;
+    mGuaranteeClient = false;
+    mNoClientsCounter = false;
 
     sendRegistrationNotifications();
 }
@@ -104,25 +107,24 @@ bool HidlService::removeClientCallback(const sp<IClientCallback>& callback) {
     return found;
 }
 
-void HidlService::handleClientCallbacks(bool isCalledOnInterval) {
+ssize_t HidlService::handleClientCallbacks(bool isCalledOnInterval) {
     using ::android::hardware::toBinder;
     using ::android::hardware::BpHwBinder;
     using ::android::hardware::IBinder;
 
-    if (mClientCallbacks.empty()) return;
-    if (mService == nullptr) return;
+    if (mService == nullptr) return -1;
 
     // this justifies the bp cast below, no in-process HALs need this
-    if (!mService->isRemote()) return;
+    if (!mService->isRemote()) return -1;
 
     sp<IBinder> binder = toBinder(mService);
-    if (binder == nullptr) return;
+    if (binder == nullptr) return -1;
 
     sp<BpHwBinder> bpBinder = static_cast<BpHwBinder*>(binder.get());
     ssize_t count = bpBinder->getNodeStrongRefCount();
 
     // binder driver doesn't support this feature
-    if (count == -1) return;
+    if (count == -1) return count;
 
     bool hasClients = count > 1; // this process holds a strong count
 
@@ -141,6 +143,7 @@ void HidlService::handleClientCallbacks(bool isCalledOnInterval) {
     }
 
     mGuaranteeClient = false;
+    return count;
 }
 
 void HidlService::guaranteeClient() {

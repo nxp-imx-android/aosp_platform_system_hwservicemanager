@@ -52,7 +52,10 @@ struct HidlService {
 
     void addClientCallback(const sp<IClientCallback>& callback);
     bool removeClientCallback(const sp<IClientCallback>& callback);
-    void handleClientCallbacks(bool isCalledOnInterval);
+
+    // return is number of clients (-1 means this is not implemented)
+    // count includes one held by hwservicemanager
+    ssize_t handleClientCallbacks(bool isCalledOnInterval);
 
     // when giving out a handle to a client, but the kernel might not know this yet
     void guaranteeClient();
