@@ -36,6 +36,23 @@ namespace hidl {
 namespace manager {
 namespace implementation {
 
+AccessControl::CallingContext getBinderCallingContext() {
+    const auto& self = IPCThreadState::self();
+
+    pid_t pid = self->getCallingPid();
+    const char* sid = self->getCallingSid();
+
+    if (sid == nullptr) {
+        if (pid != getpid()) {
+            android_errorWriteLog(0x534e4554, "121035042");
+        }
+
+        return AccessControl::getCallingContext(pid);
+    } else {
+        return { true, sid, pid };
+    }
+}
+
 static constexpr uint64_t kServiceDiedCookie = 0;
 static constexpr uint64_t kPackageListenerDiedCookie = 1;
 static constexpr uint64_t kServiceListenerDiedCookie = 2;
@@ -244,8 +261,7 @@ Return<sp<IBase>> ServiceManager::get(const hidl_string& hidlFqName,
     const std::string fqName = hidlFqName;
     const std::string name = hidlName;
 
-    pid_t pid = IPCThreadState::self()->getCallingPid();
-    if (!mAcl.canGet(fqName, pid)) {
+    if (!mAcl.canGet(fqName, getBinderCallingContext())) {
         return nullptr;
     }
 
@@ -284,11 +300,10 @@ Return<bool> ServiceManager::add(const hidl_string& name, const sp<IBase>& servi
         return false;
     }
 
-    pid_t pid = IPCThreadState::self()->getCallingPid();
-    auto context = mAcl.getContext(pid);
+    auto pidcon = getBinderCallingContext();
 
     auto ret = service->interfaceChain([&](const auto &interfaceChain) {
-        addSuccess = addImpl(name, service, interfaceChain, context, pid);
+        addSuccess = addImpl(name, service, interfaceChain, pidcon);
     });
 
     if (!ret.isOk()) {
@@ -299,11 +314,10 @@ Return<bool> ServiceManager::add(const hidl_string& name, const sp<IBase>& servi
     return addSuccess;
 }
 
-bool ServiceManager::addImpl(const hidl_string& name,
+bool ServiceManager::addImpl(const std::string& name,
                              const sp<IBase>& service,
                              const hidl_vec<hidl_string>& interfaceChain,
-                             const AccessControl::Context &context,
-                             pid_t pid) {
+                             const AccessControl::CallingContext& callingContext) {
     if (interfaceChain.size() == 0) {
         LOG(WARNING) << "Empty interface chain for " << name;
         return false;
@@ -313,21 +327,41 @@ bool ServiceManager::addImpl(const hidl_string& name,
     for(size_t i = 0; i < interfaceChain.size(); i++) {
         const std::string fqName = interfaceChain[i];
 
-        if (!mAcl.canAdd(fqName, context, pid)) {
+        if (!mAcl.canAdd(fqName, callingContext)) {
             return false;
         }
     }
 
+    // Detect duplicate registration
+    if (interfaceChain.size() > 1) {
+        // second to last entry should be the highest base class other than IBase.
+        const std::string baseFqName = interfaceChain[interfaceChain.size() - 2];
+        const HidlService *hidlService = lookup(baseFqName, name);
+        if (hidlService != nullptr && hidlService->getService() != nullptr) {
+            // This shouldn't occur during normal operation. Here are some cases where
+            // it might get hit:
+            // - bad configuration (service installed on device multiple times)
+            // - race between death notification and a new service being registered
+            //     (previous logs should indicate a separate problem)
+            const std::string childFqName = interfaceChain[0];
+            pid_t newServicePid = IPCThreadState::self()->getCallingPid();
+            pid_t oldServicePid = hidlService->getDebugPid();
+            LOG(WARNING) << "Detected instance of " << childFqName << " (pid: " << newServicePid
+                    << ") registering over instance of or with base of " << baseFqName << " (pid: "
+                    << oldServicePid << ").";
+        }
+    }
+
+    // Unregister superclass if subclass is registered over it
     {
         // For IBar extends IFoo if IFoo/default is being registered, remove
         // IBar/default. This makes sure the following two things are equivalent
         // 1). IBar::castFrom(IFoo::getService(X))
         // 2). IBar::getService(X)
         // assuming that IBar is declared in the device manifest and there
-        // is also not an IBaz extends IFoo.
+        // is also not an IBaz extends IFoo and there is no race.
         const std::string childFqName = interfaceChain[0];
-        const PackageInterfaceMap &ifaceMap = mServiceMap[childFqName];
-        const HidlService *hidlService = ifaceMap.lookup(name);
+        const HidlService *hidlService = lookup(childFqName, name);
         if (hidlService != nullptr) {
             const sp<IBase> remove = hidlService->getService();
 
@@ -346,9 +380,9 @@ bool ServiceManager::addImpl(const hidl_string& name,
 
         if (hidlService == nullptr) {
             ifaceMap.insertService(
-                std::make_unique<HidlService>(fqName, name, service, pid));
+                std::make_unique<HidlService>(fqName, name, service, callingContext.pid));
         } else {
-            hidlService->setService(service, pid);
+            hidlService->setService(service, callingContext.pid);
         }
 
         ifaceMap.sendPackageRegistrationNotification(fqName, name);
@@ -366,8 +400,7 @@ Return<ServiceManager::Transport> ServiceManager::getTransport(const hidl_string
                                                                const hidl_string& name) {
     using ::android::hardware::getTransport;
 
-    pid_t pid = IPCThreadState::self()->getCallingPid();
-    if (!mAcl.canGet(fqName, pid)) {
+    if (!mAcl.canGet(fqName, getBinderCallingContext())) {
         return Transport::EMPTY;
     }
 
@@ -383,8 +416,7 @@ Return<ServiceManager::Transport> ServiceManager::getTransport(const hidl_string
 }
 
 Return<void> ServiceManager::list(list_cb _hidl_cb) {
-    pid_t pid = IPCThreadState::self()->getCallingPid();
-    if (!mAcl.canList(pid)) {
+    if (!mAcl.canList(getBinderCallingContext())) {
         _hidl_cb({});
         return Void();
     }
@@ -405,8 +437,7 @@ Return<void> ServiceManager::list(list_cb _hidl_cb) {
 
 Return<void> ServiceManager::listByInterface(const hidl_string& fqName,
                                              listByInterface_cb _hidl_cb) {
-    pid_t pid = IPCThreadState::self()->getCallingPid();
-    if (!mAcl.canGet(fqName, pid)) {
+    if (!mAcl.canGet(fqName, getBinderCallingContext())) {
         _hidl_cb({});
         return Void();
     }
@@ -449,8 +480,7 @@ Return<bool> ServiceManager::registerForNotifications(const hidl_string& fqName,
         return false;
     }
 
-    pid_t pid = IPCThreadState::self()->getCallingPid();
-    if (!mAcl.canGet(fqName, pid)) {
+    if (!mAcl.canGet(fqName, getBinderCallingContext())) {
         return false;
     }
 
@@ -532,8 +562,7 @@ Return<bool> ServiceManager::registerClientCallback(const hidl_string& hidlFqNam
 
     // only the server of the interface can register a client callback
     pid_t pid = IPCThreadState::self()->getCallingPid();
-    auto context = mAcl.getContext(pid);
-    if (!mAcl.canAdd(fqName, context, pid)) {
+    if (!mAcl.canAdd(fqName, getBinderCallingContext())) {
         return false;
     }
 
@@ -544,7 +573,7 @@ Return<bool> ServiceManager::registerClientCallback(const hidl_string& hidlFqNam
     }
 
     // sanity
-    if (registered->getPid() != pid) {
+    if (registered->getDebugPid() != pid) {
         LOG(WARNING) << "Only a server can register for client callbacks (for " << fqName
             << "/" << name << ")";
         return false;
@@ -599,16 +628,14 @@ Return<bool> ServiceManager::addWithChain(const hidl_string& name,
         return false;
     }
 
-    pid_t pid = IPCThreadState::self()->getCallingPid();
-    auto context = mAcl.getContext(pid);
+    auto callingContext = getBinderCallingContext();
 
-    return addImpl(name, service, chain, context, pid);
+    return addImpl(name, service, chain, callingContext);
 }
 
 Return<void> ServiceManager::listManifestByInterface(const hidl_string& fqName,
                                                      listManifestByInterface_cb _hidl_cb) {
-    pid_t pid = IPCThreadState::self()->getCallingPid();
-    if (!mAcl.canGet(fqName, pid)) {
+    if (!mAcl.canGet(fqName, getBinderCallingContext())) {
         _hidl_cb({});
         return Void();
     }
@@ -630,17 +657,15 @@ Return<bool> ServiceManager::tryUnregister(const hidl_string& hidlFqName,
         return false;
     }
 
-    pid_t pid = IPCThreadState::self()->getCallingPid();
-    auto context = mAcl.getContext(pid);
-
-    if (!mAcl.canAdd(fqName, context, pid)) {
+    if (!mAcl.canAdd(fqName, getBinderCallingContext())) {
         return false;
     }
 
     HidlService* registered = lookup(fqName, name);
 
     // sanity
-    if (registered->getPid() != pid) {
+    pid_t pid = IPCThreadState::self()->getCallingPid();
+    if (registered->getDebugPid() != pid) {
         LOG(WARNING) << "Only a server can unregister itself (for " << fqName
             << "/" << name << ")";
         return false;
@@ -680,8 +705,7 @@ Return<bool> ServiceManager::tryUnregister(const hidl_string& hidlFqName,
 }
 
 Return<void> ServiceManager::debugDump(debugDump_cb _cb) {
-    pid_t pid = IPCThreadState::self()->getCallingPid();
-    if (!mAcl.canList(pid)) {
+    if (!mAcl.canList(getBinderCallingContext())) {
         _cb({});
         return Void();
     }
@@ -697,7 +721,7 @@ Return<void> ServiceManager::debugDump(debugDump_cb _cb) {
         }
 
         list.push_back({
-            .pid = service->getPid(),
+            .pid = service->getDebugPid(),
             .interfaceName = service->getInterfaceName(),
             .instanceName = service->getInstanceName(),
             .clientPids = clientPids,
@@ -714,8 +738,9 @@ Return<void> ServiceManager::debugDump(debugDump_cb _cb) {
 
 Return<void> ServiceManager::registerPassthroughClient(const hidl_string &fqName,
         const hidl_string &name) {
-    pid_t pid = IPCThreadState::self()->getCallingPid();
-    if (!mAcl.canGet(fqName, pid)) {
+    auto callingContext = getBinderCallingContext();
+
+    if (!mAcl.canGet(fqName, callingContext)) {
         /* We guard this function with "get", because it's typically used in
          * the getService() path, albeit for a passthrough service in this
          * case
@@ -735,10 +760,10 @@ Return<void> ServiceManager::registerPassthroughClient(const hidl_string &fqName
 
     if (service == nullptr) {
         auto adding = std::make_unique<HidlService>(fqName, name);
-        adding->registerPassthroughClient(pid);
+        adding->registerPassthroughClient(callingContext.pid);
         ifaceMap.insertService(std::move(adding));
     } else {
-        service->registerPassthroughClient(pid);
+        service->registerPassthroughClient(callingContext.pid);
     }
     return Void();
 }

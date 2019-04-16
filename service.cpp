@@ -49,6 +49,8 @@ using android::hardware::ProcessState;
 
 // libhidl
 using android::hardware::handleTransportPoll;
+using android::hardware::HidlReturnRestriction;
+using android::hardware::setProcessHidlReturnRestriction;
 using android::hardware::setupTransportPolling;
 using android::hardware::toBinder;
 
@@ -136,13 +138,17 @@ private:
 };
 
 int main() {
+    // If hwservicemanager crashes, the system may be unstable and hard to debug. This is both why
+    // we log this and why we care about this at all.
+    setProcessHidlReturnRestriction(HidlReturnRestriction::ERROR_IF_UNCHECKED);
+
     sp<ServiceManager> manager = new ServiceManager();
-    if (!manager->add(serviceName, manager)) {
+    if (!manager->add(serviceName, manager).withDefault(false)) {
         ALOGE("Failed to register hwservicemanager with itself.");
     }
 
     sp<TokenManager> tokenManager = new TokenManager();
-    if (!manager->add(serviceName, tokenManager)) {
+    if (!manager->add(serviceName, tokenManager).withDefault(false)) {
         ALOGE("Failed to register ITokenManager with hwservicemanager.");
     }
 
