@@ -710,23 +710,8 @@ Return<void> ServiceManager::debugDump(debugDump_cb _cb) {
         return Void();
     }
 
-    size_t serviceCount = 0;
-    forEachServiceEntry([&] (const HidlService* /*service*/) {
-        serviceCount++;
-        return true;  // continue
-    });
-
-    hidl_vec<InstanceDebugInfo> list(serviceCount);
-
-    if (list.size() >= SIZE_MAX / sizeof(InstanceDebugInfo)) {
-        LOG(ERROR) << "Could not create debug information.";
-        _cb({});
-        return Void();
-    }
-    memset(list.data(), 0, list.size() * sizeof(InstanceDebugInfo));
-
-    size_t idx = 0;
-    forEachServiceEntry([&] (const HidlService* service) {
+    std::vector<IServiceManager::InstanceDebugInfo> list;
+    forEachServiceEntry([&] (const HidlService *service) {
         hidl_vec<int32_t> clientPids;
         clientPids.resize(service->getPassthroughClients().size());
 
@@ -735,14 +720,14 @@ Return<void> ServiceManager::debugDump(debugDump_cb _cb) {
             clientPids[i++] = p;
         }
 
-        InstanceDebugInfo& item = list[idx];
-        item.pid = service->getDebugPid();
-        item.interfaceName = service->getInterfaceName();
-        item.instanceName = service->getInstanceName();
-        item.clientPids = clientPids;
-        item.arch = ::android::hidl::base::V1_0::DebugInfo::Architecture::UNKNOWN;
+        list.push_back({
+            .pid = service->getDebugPid(),
+            .interfaceName = service->getInterfaceName(),
+            .instanceName = service->getInstanceName(),
+            .clientPids = clientPids,
+            .arch = ::android::hidl::base::V1_0::DebugInfo::Architecture::UNKNOWN
+        });
 
-        idx++;
         return true;  // continue
     });
 
