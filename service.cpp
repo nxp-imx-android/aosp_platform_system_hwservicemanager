@@ -49,6 +49,7 @@ using android::hardware::ProcessState;
 
 // libhidl
 using android::hardware::handleTransportPoll;
+using android::hardware::setRequestingSid;
 using android::hardware::HidlReturnRestriction;
 using android::hardware::setProcessHidlReturnRestriction;
 using android::hardware::setupTransportPolling;
@@ -143,6 +144,8 @@ int main() {
     setProcessHidlReturnRestriction(HidlReturnRestriction::ERROR_IF_UNCHECKED);
 
     sp<ServiceManager> manager = new ServiceManager();
+    setRequestingSid(manager, true);
+
     if (!manager->add(serviceName, manager).withDefault(false)) {
         ALOGE("Failed to register hwservicemanager with itself.");
     }
