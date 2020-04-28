@@ -32,8 +32,7 @@ vintf::Transport getTransportFromManifest(
     if (vm == nullptr) {
         return vintf::Transport::EMPTY;
     }
-    return vm->getHidlTransport(fqName.package(), fqName.getVersion(),
-                                fqName.name(), instanceName);
+    return vm->getTransport(fqName.package(), fqName.getVersion(), fqName.name(), instanceName);
 }
 
 vintf::Transport getTransport(const std::string &interfaceName, const std::string &instanceName) {
@@ -71,21 +70,6 @@ vintf::Transport getTransport(const std::string &interfaceName, const std::strin
     return vintf::Transport::EMPTY;
 }
 
-static void insertManifestInstances(const FQName& fqName,
-                                    const std::shared_ptr<const vintf::HalManifest>& manifest,
-                                    const std::string& manifestType,
-                                    std::set<std::string>* toSet) {
-    if (manifest == nullptr) {
-        LOG(ERROR) << "Device is missing " << manifestType << " manifest.";
-        return;
-    }
-
-    std::set<std::string> manifestSet = manifest->getHidlInstances(
-        fqName.package(), fqName.getVersion(), fqName.name());
-
-    toSet->insert(manifestSet.begin(), manifestSet.end());
-}
-
 std::set<std::string> getInstances(const std::string& interfaceName) {
     FQName fqName;
     if (!FQName::parse(interfaceName, &fqName) || !fqName.isFullyQualified() ||
@@ -97,10 +81,16 @@ std::set<std::string> getInstances(const std::string& interfaceName) {
 
     std::set<std::string> ret;
 
-    insertManifestInstances(
-        fqName, vintf::VintfObject::GetDeviceHalManifest(), "device", &ret);
-    insertManifestInstances(
-        fqName, vintf::VintfObject::GetFrameworkHalManifest(), "framework", &ret);
+    auto deviceManifest = vintf::VintfObject::GetDeviceHalManifest();
+    auto frameworkManifest = vintf::VintfObject::GetFrameworkHalManifest();
+
+    std::set<std::string> deviceSet =
+        deviceManifest->getInstances(fqName.package(), fqName.getVersion(), fqName.name());
+    std::set<std::string> frameworkSet =
+        frameworkManifest->getInstances(fqName.package(), fqName.getVersion(), fqName.name());
+
+    ret.insert(deviceSet.begin(), deviceSet.end());
+    ret.insert(frameworkSet.begin(), frameworkSet.end());
 
     return ret;
 }

@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 
-#pragma once
+#ifndef ANDROID_HIDL_TOKEN_V1_0_TOKENMANAGER_H
+#define ANDROID_HIDL_TOKEN_V1_0_TOKENMANAGER_H
 
 #include <android/hidl/token/1.0/ITokenManager.h>
 #include <chrono>
@@ -79,3 +80,5 @@ private:
 }  // namespace token
 }  // namespace hidl
 }  // namespace android
+
+#endif  // ANDROID_HIDL_TOKEN_V1_0_TOKENMANAGER_H
