@@ -143,6 +143,9 @@ int main() {
     // we log this and why we care about this at all.
     setProcessHidlReturnRestriction(HidlReturnRestriction::ERROR_IF_UNCHECKED);
 
+    // TODO(b/36424585): make fatal
+    ProcessState::self()->setCallRestriction(ProcessState::CallRestriction::ERROR_IF_NOT_ONEWAY);
+
     sp<ServiceManager> manager = new ServiceManager();
     setRequestingSid(manager, true);
 
