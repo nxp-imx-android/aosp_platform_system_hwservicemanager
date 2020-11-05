@@ -163,7 +163,7 @@ int main() {
     sp<BHwBinder> service = static_cast<BHwBinder*>(binder.get()); // local binder object
     IPCThreadState::self()->setTheContextObject(service);
     // Then tell the kernel
-    ProcessState::self()->becomeContextManager(nullptr, nullptr);
+    ProcessState::self()->becomeContextManager();
 
     int rc = property_set("hwservicemanager.ready", "true");
     if (rc) {
