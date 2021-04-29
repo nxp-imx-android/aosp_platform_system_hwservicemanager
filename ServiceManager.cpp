@@ -255,7 +255,12 @@ static void tryStartService(const std::string& fqName, const std::string& name) 
               << " is not registered, trying to start it as a lazy HAL.";
 
     std::thread([=] {
-        (void)SetProperty("ctl.interface_start", fqName + "/" + name);
+        if (!SetProperty("ctl.interface_start", fqName + "/" + name)) {
+            LOG(INFO) << "Tried to start " << fqName << "/" << name
+                      << " as a lazy service, but was unable to. Usually this happens when a "
+                         "service is not installed, but if the service is intended to be used as a "
+                         "lazy service, then it may be configured incorrectly.";
+        }
     }).detach();
 }
 
